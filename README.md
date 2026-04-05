@@ -295,7 +295,269 @@ same-origin — no CORS headers needed.
 - **Re-ingestion cadence:** The vector store is a point-in-time snapshot. A cron job
   re-running the scraper + ingest weekly would keep it current.
 - **Re-ranking:** Adding a Jina reranker pass after retrieval would improve precision
+  on complex queries wh# GitBot — GitLab Knowledge Assistant
+
+An AI-powered chatbot that answers questions about GitLab's
+[Handbook](https://handbook.gitlab.com/) and [Direction](https://about.gitlab.com/direction/)
+pages. Built with a RAG pipeline, Gemini LLM, Jina embeddings, ChromaDB, FastAPI, and React.
+
+---
+
+## Architecture
+
+```
+User
+ │
+ ▼
+React Frontend (localhost:3000)
+ │  SSE streaming over /chat/stream
+ │  Vite proxy → FastAPI backend
+ ▼
+FastAPI Backend (localhost:8000)
+ ├── Guardrail check   →  Gemini 2.0 Flash (relevance classifier)
+ ├── Retrieval         →  Jina embeddings + ChromaDB (4,697 vectors)
+ └── Generation        →  Gemini 2.0 Flash (RAG answer + streaming)
+```
+
+**Data pipeline (run once before starting the server):**
+```
+GitLab Handbook + Direction pages
+ │  scraper/scrape.py   (BeautifulSoup crawler)
+ ▼
+data/raw/               (JSON, one file per page)
+ │  pipeline/chunker.py (sliding window, ~400 tok, 80 tok overlap)
+ ▼
+data/chunks/            (JSON, overlapping text chunks)
+ │  pipeline/ingest.py  (Jina embeddings → ChromaDB upsert)
+ ▼
+data/chroma/            (persistent local vector store)
+```
+
+---
+
+## Project Structure
+
+```
+gitlab-chatbot/
+├── scraper/
+│   └── scrape.py           Crawls handbook + direction pages
+├── pipeline/
+│   ├── chunker.py          Splits pages into overlapping chunks
+│   ├── ingest.py           Embeds chunks via Jina → ChromaDB
+│   └── retriever.py        Query-time semantic search
+├── backend/
+│   ├── main.py             FastAPI app (3 endpoints)
+│   ├── llm.py              Gemini wrapper (stream + guardrail)
+│   └── prompts.py          System prompt + RAG prompt builder
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx             Root layout + empty state
+│   │   ├── hooks/
+│   │   │   └── useChat.js      SSE streaming hook
+│   │   ├── components/
+│   │   │   ├── Message.jsx     Chat bubble + markdown renderer
+│   │   │   ├── ChatInput.jsx   Input + source filter controls
+│   │   │   └── Sidebar.jsx     Brand + source legend
+│   │   └── index.css           Design tokens + animations
+│   └── package.json
+├── requirements.txt
+└── .gitignore
+```
+
+---
+
+## Local Setup
+
+### Prerequisites
+
+- Python 3.11+ (3.14 works — see note on `lxml` below)
+- Node.js 18+
+- API keys: [Gemini](https://aistudio.google.com) (free) · [Jina](https://jina.ai) (free)
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/piyushKothawade/GitBot
+cd GitBot
+pip install -r requirements.txt
+```
+
+> **Python 3.14 note:** `lxml` has no wheels for 3.14 yet.
+> The scraper uses `html.parser` instead — no action needed.
+
+### 2. Set environment variables
+
+```bash
+# Windows
+set GEMINI_API_KEY=your_gemini_key
+set JINA_API_KEY=your_jina_key
+
+# macOS / Linux
+export GEMINI_API_KEY=your_gemini_key
+export JINA_API_KEY=your_jina_key
+```
+
+Get keys for free:
+- Gemini → [aistudio.google.com](https://aistudio.google.com)
+- Jina → [jina.ai](https://jina.ai)
+
+### 3. Run the data pipeline
+
+```bash
+# Step 1 — Scrape GitLab pages (~10 min, up to 500 pages)
+python -m scraper.scrape
+
+# Step 2 — Chunk the pages
+python -m pipeline.chunker
+
+# Step 3 — Embed and ingest into ChromaDB
+python -m pipeline.ingest
+
+# Step 4 — Test retrieval (optional sanity check)
+python -m pipeline.retriever "What is GitLab's mission?"
+```
+
+Expected output after ingest:
+```
+Done. ChromaDB collection 'gitlab_docs' now has 4697 vectors.
+```
+
+### 4. Start the backend
+
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+Expected output:
+```
+INFO: Retriever ready. Collection has 4697 vectors.
+INFO: Retriever initialised successfully.
+INFO: Application startup complete.
+```
+
+Visit `http://localhost:8000/docs` for the interactive Swagger API explorer.
+
+### 5. Start the frontend
+
+```bash
+cd frontend
+npm install
+npm start
+```
+
+Visit `http://localhost:3000`. The CRA dev server proxies `/chat` and `/health`
+requests to the FastAPI backend automatically via the `proxy` field in `package.json`.
+
+---
+
+## API Reference
+
+### `GET /health`
+
+```json
+{
+  "status": "ok",
+  "retriever_ready": true,
+  "collection_size": 4697
+}
+```
+
+### `POST /chat`
+
+```json
+// Request
+{
+  "query": "What is GitLab's PTO policy?",
+  "history": [],
+  "top_k": 6,
+  "source_filter": "handbook",
+  "use_hybrid": false
+}
+
+// Response
+{
+  "answer": "GitLab offers ...",
+  "sources": [
+    { "title": "...", "url": "...", "source": "handbook", "score": 0.91 }
+  ],
+  "query": "What is GitLab's PTO policy?"
+}
+```
+
+### `POST /chat/stream`
+
+Same request body as `/chat`. Returns `text/event-stream`:
+
+```
+data: {"type": "token",   "content": "GitLab "}
+data: {"type": "token",   "content": "offers "}
+data: {"type": "sources", "content": [{...}]}
+data: {"type": "done"}
+```
+
+Error events:
+```
+data: {"type": "error", "content": "Query is off-topic..."}
+```
+
+---
+
+## Key Design Decisions
+
+### Why RAG over fine-tuning?
+GitLab's Handbook is a living document — pages update frequently. RAG retrieves
+the latest indexed content at query time without retraining. Fine-tuning would
+bake in a snapshot that goes stale.
+
+### Why Jina embeddings over Gemini?
+Gemini's embedding API has strict per-minute rate limits that caused failures
+during bulk ingestion. Jina's API is more permissive, and `jina-embeddings-v4`
+performs comparably on retrieval benchmarks. The task-specific LoRA adapters
+(`retrieval.passage` for documents, `retrieval.query` for queries) further
+improve asymmetric retrieval quality.
+
+### Why chunking with overlap?
+A fact often spans a paragraph boundary. With pure non-overlapping chunks, the
+retriever might return a chunk that starts mid-sentence, losing critical context.
+80-token overlap ensures adjacent chunks share enough text to cover boundary cases.
+
+### Why SSE over WebSockets?
+SSE is unidirectional (server → client), which is all we need for streaming
+LLM responses. It works over standard HTTP/1.1, requires no upgrade handshake,
+and is natively supported by `fetch()` + `ReadableStream` in the browser.
+
+### Guardrail design (fail-open)
+The relevance classifier uses a separate low-temperature Gemini call before the
+main RAG call. It's designed to fail open — if the classifier itself errors,
+the query is allowed through. This avoids blocking valid questions due to
+classifier API hiccups.
+
+---
+
+## Features
+
+- **Streaming responses** — tokens appear as they're generated via SSE
+- **Source citations** — every answer links back to the exact Handbook/Direction page with relevance score
+- **Relevance guardrail** — off-topic queries are rejected before hitting the LLM
+- **Source filtering** — scope search to Handbook only, Direction only, or hybrid weighted retrieval
+- **Suggested questions** — contextual prompts on the empty state to get started quickly
+- **Copy button** — one-click clipboard copy of any assistant response
+- **Multi-turn context** — last 3 conversation exchanges included in every LLM call
+- **Hybrid search** — separate retrieval per source with configurable weighting, merged and deduplicated
+
+---
+
+## Limitations & Future Improvements
+
+- **Re-ingestion cadence:** The vector store is a point-in-time snapshot. A cron job
+  re-running the scraper + ingest weekly would keep it current with Handbook updates.
+- **Re-ranking:** Adding a Jina reranker pass after retrieval would improve precision
   on complex queries where the top-6 chunks aren't all equally relevant.
+- **Authentication:** The API has no auth layer. Adding GitLab OAuth would scope
+  access to employees only.
+- **Evaluation:** A held-out QA dataset benchmarking retrieval recall and answer
+  faithfulness (e.g. with RAGAS) would give objective quality metrics.
+- **Deployment:** Planned for Hugging Face Spaces (backend) + Vercel (frontend).ere the top-6 chunks aren't all equally relevant.
 - **Authentication:** The API has no auth layer. For internal GitLab use,
   adding GitLab OAuth would scope access to employees only.
 - **Evaluation:** A held-out QA dataset benchmarking retrieval recall and answer

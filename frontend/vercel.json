@@ -6,11 +6,11 @@
   "rewrites": [
     {
       "source": "/chat/:path*",
-      "destination": "https://your-hf-space.hf.space/chat/:path*"
+      "destination": "https://huggingface.co/spaces/impk-415/GitBot/chat/:path*"
     },
     {
       "source": "/health",
-      "destination": "https://your-hf-space.hf.space/health"
+      "destination": "https://huggingface.co/spaces/impk-415/GitBot/health"
     }
   ],
   "headers": [
