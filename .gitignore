@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+
+# Data — raw scrape and chunk files are reproducible, exclude from repo
+data/raw/
+data/chunks/
+
+# ChromaDB — include data/chroma/ in repo (via Git LFS) so deployment works
+# If you don't want to use LFS, comment the line below and rebuild on deploy
+# data/chroma/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
